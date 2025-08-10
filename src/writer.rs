@@ -256,9 +256,12 @@ impl<W: Write + Seek> PmTilesStreamWriter<W> {
         if num_leaves > 0 {
             // Write leaf directories
             for leaf in root_dir.entries() {
-                let len = leaf.length as usize;
-                let mut dir = Directory::with_capacity(len);
-                for entry in self.entries.drain(0..len) {
+                let count = leaf.run_length as usize;
+                if self.entries.len() < count {
+                    return Err(PmtError::IndexEntryOverflow);
+                }
+                let mut dir = Directory::with_capacity(count);
+                for entry in self.entries.drain(0..count) {
                     dir.push(entry);
                 }
                 dir.write_compressed_to(&mut self.out, self.header.internal_compression)?;
@@ -297,25 +300,29 @@ impl<W: Write + Seek> PmTilesStreamWriter<W> {
 
     fn build_roots_leaves(&self, leaf_size: usize) -> PmtResult<(Directory, usize)> {
         let mut root_dir = Directory::with_capacity(self.entries.len() / leaf_size);
-        let mut offset = 0;
+        let mut offset = 0_u64;
+    
         for chunk in self.entries.chunks(leaf_size) {
-            let leaf_size = self.dir_size(chunk)?;
+            // Compressed byte size of this leaf directory
+            let leaf_bytes = {
+                let dir = Directory::from_entries(chunk.to_vec());
+                dir.compressed_size(self.header.internal_compression)?
+            };
+    
             root_dir.push(DirEntry {
                 tile_id: chunk[0].tile_id,
                 offset,
-                length: into_u32(leaf_size)?,
-                run_length: 0,
+                // length holds the compressed byte size of the leaf directory
+                length: into_u32(leaf_bytes)?,
+                // run_length carries how many directory entries belong to this leaf
+                run_length: into_u32(chunk.len())?,
             });
-            offset += leaf_size as u64;
+    
+            offset += leaf_bytes as u64;
         }
-
+    
         let num_leaves = root_dir.entries().len();
         Ok((root_dir, num_leaves))
-    }
-
-    fn dir_size(&self, entries: &[DirEntry]) -> PmtResult<usize> {
-        let dir = Directory::from_entries(entries.to_vec());
-        dir.compressed_size(self.header.internal_compression)
     }
 
     /// Finish writing the `PMTiles` file.
